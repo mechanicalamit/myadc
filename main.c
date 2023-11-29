@@ -29,7 +29,6 @@
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/cm3/nvic.h>
 
-
 /* Read variable for ADC_regular_read, Even though uint32_t is returned, only the lower 16 bits have the ADC values */
 uint16_t myadc_val = 0;
 
@@ -44,10 +43,18 @@ static QueueHandle_t adc_push_q;
 static QueueHandle_t filt_push_q;
 
 /* ADC values Plausibility limits */
-#define ADC_VAL_MIN	500
+#define ADC_VAL_MIN 500
 #define ADC_VAL_MAX 50000
 
+/* Delays in Tasks, Consumers(UART & FILT) get higher priority and lower delays
+ * Producers(ADC) gets lower priority and higher delays */
+#define task_ADC_DELAY 500 /* in milli-seconds */
+#define task_FILT_DELAY 400
+#define task_UART_DELAY 300
 
+#define task_ADC_PRIO 1
+#define task_FILT_PRIO 2
+#define task_UART_PRIO 3
 
 static void usart_setup(void)
 {
@@ -80,7 +87,7 @@ static void irq_setup(void)
 
 static void adc_setup(void)
 {
-	int i; 
+	int i;
 
 	/* Enable GPIO clocks. A for ADC, C for LED */
 	rcc_periph_clock_enable(RCC_GPIOA);
@@ -97,21 +104,11 @@ static void adc_setup(void)
 	rcc_periph_clock_enable(RCC_ADC1);
 
 	adc_power_off(ADC1);
-
-	/* We configure everything for one single timer triggered injected conversion with interrupt generation. */
-	/* While not needed for a single channel, try out scan mode which does all channels in one sweep and
-	 * generates the interrupt/EOC/JEOC flags set at the end of all channels, not each one.
-	 */
 	adc_disable_scan_mode(ADC1);
 	adc_set_single_conversion_mode(ADC1);
-
-	/* We want to start the injected conversion with the TIM2 TRGO 
-	adc_enable_external_trigger_injected(ADC1,ADC_CR2_JEXTSEL_TIM2_TRGO); */
-
 	adc_disable_external_trigger_regular(ADC1);
 
 	/* Generate the ADC1_2_IRQ NOT Injected now */
-	/* adc_enable_eoc_interrupt_injected(ADC1); */
 	adc_enable_eoc_interrupt(ADC1);
 	adc_set_right_aligned(ADC1);
 
@@ -151,6 +148,23 @@ static void my_usart_print_int(uint32_t usart, int value)
 	usart_send_blocking(usart, '\n');
 }
 
+static void task_uart(void *arg __attribute((unused)))
+{
+	static uint16_t locavg; /* Hold a poor mans moving average */
+	uint16_t locvar;
+
+	/* Receive from Filt queue, 
+	 * Already checked for plausibility, so value is good
+	 * Do nothing if nothing received */
+	for (;;) {
+		if (xQueueReceive(filt_push_q, &locvar, 0) == pdTRUE) {
+			locavg = ((locavg >> 2) + (locvar >> 2)); /* Cannot overflow also */
+			my_usart_print_int(USART2, locavg);
+		}
+		vTaskDelay(task_UART_DELAY / portTICK_PERIOD_MS);
+	}
+}
+
 static void task_filter(void *arg __attribute((unused)))
 {
 	uint16_t locvar;
@@ -159,21 +173,19 @@ static void task_filter(void *arg __attribute((unused)))
 	 * Filter(based on max and min), and send to next queue if received
 	 * Do nothing if nothing received */
 	for (;;) {
-		if (xQueueReceive(adc_push_q, &locvar, 0) == pdTRUE){
+		if (xQueueReceive(adc_push_q, &locvar, 0) == pdTRUE) {
 			gpio_toggle(GPIOC, GPIO13); /* Heartbeat 2 */
-			if ( (locvar >= ADC_VAL_MIN) && (locvar <= ADC_VAL_MAX) ) {
+			if ((locvar >= ADC_VAL_MIN) && (locvar <= ADC_VAL_MAX)) {
 				if (xQueueSend(filt_push_q, &locvar, 0) != pdTRUE)
-					usart_send_blocking(USART2, 'f'); /* Failed to send to next(filt) queue */
-			}
-			else {
-					usart_send_blocking(USART2, 'l'); /* We are outside Plausibility limits */
+					usart_send_blocking( USART2, 'f'); /* Failed to send to next(filt) queue */
+			} else {
+				usart_send_blocking( USART2, 'l'); /* We are outside Plausibility limits */
 			}
 		}; /* No else for xQueueReceive */
 
-		vTaskDelay( 400 / portTICK_PERIOD_MS );
+		vTaskDelay(task_FILT_DELAY / portTICK_PERIOD_MS);
 	}
 }
-
 
 static void task_ADC1(void *arg __attribute((unused)))
 {
@@ -187,9 +199,9 @@ static void task_ADC1(void *arg __attribute((unused)))
 		gpio_toggle(GPIOC, GPIO13); /* Heartbeat */
 		adc_start_conversion_direct(ADC1);
 		/* adc1_2_isr :  IRQ will handle the read part */
-		vTaskDelay( 500 / portTICK_PERIOD_MS );
+		vTaskDelay(task_ADC_DELAY / portTICK_PERIOD_MS);
 	}
-} 
+}
 
 int main(void)
 {
@@ -208,7 +220,6 @@ int main(void)
 	adc_push_q = xQueueCreate(ADC_PUSH_QLEN, sizeof(uint16_t));
 	filt_push_q = xQueueCreate(FILT_PUSH_QLEN, sizeof(uint16_t));
 
-
 	/* Send a message on USART1 to show startup demarcation */
 	usart_send_blocking(USART2, 's');
 	usart_send_blocking(USART2, 't');
@@ -216,15 +227,15 @@ int main(void)
 	usart_send_blocking(USART2, '\r');
 	usart_send_blocking(USART2, '\n');
 
-
 	/* Consumers get higher task priority so that we don't overflow queues */
 	/* Start UART Task, Priority 3 */
+	xTaskCreate(task_uart, "task_uart", 300, NULL, task_UART_PRIO, NULL);
 
 	/* Start filtering Task, Priority 2 */
-	xTaskCreate(task_filter, "task_filter", 300, NULL, 2, NULL);
+	xTaskCreate(task_filter, "task_filter", 300, NULL, task_FILT_PRIO, NULL);
 
 	/* Start ADC Task, Priority 1 */
-	xTaskCreate(task_ADC1, "startADC_Conv", 300, NULL, 1, NULL);
+	xTaskCreate(task_ADC1, "startADC_Conv", 300, NULL, task_ADC_PRIO, NULL);
 
 	/* All Tasks created */
 	usart_send_blocking(USART2, 'e');
