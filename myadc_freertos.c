@@ -19,6 +19,9 @@
  * along with this library.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include "FreeRTOS.h"
+#include "task.h"
+
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/flash.h>
 #include <libopencm3/stm32/gpio.h>
@@ -27,6 +30,7 @@
 #include <libopencm3/stm32/timer.h>
 #include <libopencm3/cm3/nvic.h>
 
+/* TODO : Setup Data Structures, long queue for ADC, short queue for Filtering, One value for UART */
 volatile uint16_t myadc_val = 0;
 
 static void usart_setup(void)
@@ -59,15 +63,15 @@ static void gpio_setup(void)
 	rcc_periph_clock_enable(RCC_GPIOC);
 
 	/* Setup the LEDs. */
-	gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ,
-		      GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
+	gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL,
+		      GPIO13);
 }
 
 static void irq_setup(void)
 {
 	/* Enable the adc1_2_isr() routine */
-    nvic_set_priority(NVIC_ADC1_2_IRQ, 0x00); /* Top 4 bits set priority */
-    nvic_enable_irq(NVIC_ADC1_2_IRQ);
+	nvic_set_priority(NVIC_ADC1_2_IRQ, 0x00); /* Top 4 bits set priority */
+	nvic_enable_irq(NVIC_ADC1_2_IRQ);
 }
 
 static void adc_setup(void)
@@ -105,7 +109,7 @@ static void adc_setup(void)
 
 	/* Wait for ADC starting up. */
 	/* TODO : Change with vDelay */
-	for (i = 0; i < 800000; i++)    /* Wait a bit. */
+	for (i = 0; i < 800000; i++) /* Wait a bit. */
 		__asm__("nop");
 
 	adc_reset_calibration(ADC1);
@@ -136,31 +140,44 @@ static void my_usart_print_int(uint32_t usart, int value)
 	usart_send_blocking(usart, '\n');
 }
 
-static void task_start_ADC1_convesion_direct(void)
+static void task_ADC1(void *arg __attribute((unused)))
 {
-	uint8_t channel_array[16];
+	static uint8_t channel_array[16];
+	const TickType_t xDelay = 500 / portTICK_PERIOD_MS;
 
 	/* Select the channel we want to convert, ADC0 == PA0 */
-
-	channel_array[0] = 0; 
+	channel_array[0] = 0;
 	adc_set_regular_sequence(ADC1, 1, channel_array);
-	gpio_toggle(GPIOC, GPIO13); /* Toggle led on every request */
-	adc_start_conversion_direct(ADC1);
 
-	/* adc1_2_isr :  IRQ will handle the read part */
+	for (;;) {
+		gpio_toggle(
+			GPIOC,
+			GPIO13); /* Toggle led on every request, also heartbeat */
+		adc_start_conversion_direct(ADC1);
+		/* adc1_2_isr :  IRQ will handle the read part */
+		vTaskDelay(xDelay);
+	}
 }
 
 int main(void)
 {
-
 	rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
-						 
+
+	/* TODO : GPIO setup, see if we can move these to the peripherals using it */
 	gpio_setup();
+
+	/* Setup UART */
 	usart_setup();
+
+	/* Enable IRQs */
 	irq_setup();
+
+	/* Setup ADC */
 	adc_setup();
 
-	gpio_set(GPIOC, GPIO13);	                /* LED1 on */
+	/* Start UART Task, Consumers first */
+
+	/* Start filtering Task */
 
 	/* Send a message on USART1. */
 	usart_send_blocking(USART2, 's');
@@ -169,21 +186,23 @@ int main(void)
 	usart_send_blocking(USART2, '\r');
 	usart_send_blocking(USART2, '\n');
 
-	task_start_ADC1_convesion_direct();
-
 	usart_send_blocking(USART2, 'e');
-	my_usart_print_int(USART2, myadc_val);
-	for(;;);
 
-	while (1) {
-		my_usart_print_int(USART2, myadc_val);
-	}
+	/* Start ADC Task */
+	xTaskCreate(task_ADC1, "demo", 300, NULL, 1, NULL);
+
+	vTaskStartScheduler();
+	for (;;)
+		;
 
 	return 0;
 }
 
 void adc1_2_isr(void)
 {
-    myadc_val = adc_read_regular(ADC1); 
-    usart_send_blocking(USART2, 'd');
+	/* TODO : Read and it to queue */
+	myadc_val = adc_read_regular(ADC1);
+	usart_send_blocking(USART2, 'd');
 }
+
+/* vim: tabstop=4 :set noexpandtab: */
