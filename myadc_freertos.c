@@ -92,7 +92,11 @@ static void irq_setup(void)
 
 static void adc_setup(void)
 {
-	int i;
+	int i; /* Remove with vDelay/vSleep */
+
+	/* Setup GPIO for ADC Pin PA0 and maybe PA1 */
+	gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_ANALOG, GPIO0);
+	gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_ANALOG, GPIO1);
 
 	rcc_periph_clock_enable(RCC_ADC1);
 
@@ -102,15 +106,22 @@ static void adc_setup(void)
 	/* While not needed for a single channel, try out scan mode which does all channels in one sweep and
 	 * generates the interrupt/EOC/JEOC flags set at the end of all channels, not each one.
 	 */
-	adc_enable_scan_mode(ADC1);
+	adc_disable_scan_mode(ADC1);
 	adc_set_single_conversion_mode(ADC1);
-	/* We want to start the injected conversion with the TIM2 TRGO */
-	adc_enable_external_trigger_injected(ADC1,ADC_CR2_JEXTSEL_TIM2_TRGO);
-	/* Generate the ADC1_2_IRQ */
-	adc_enable_eoc_interrupt_injected(ADC1);
+
+	/* We want to start the injected conversion with the TIM2 TRGO 
+	adc_enable_external_trigger_injected(ADC1,ADC_CR2_JEXTSEL_TIM2_TRGO); */
+
+	adc_disable_external_trigger_regular(ADC1);
+
+	/* Generate the ADC1_2_IRQ NOT Injected now */
+	/* adc_enable_eoc_interrupt_injected(ADC1); */
+	adc_enable_eoc_interrupt(ADC1);
 	adc_set_right_aligned(ADC1);
-	/* We want to read the temperature sensor, so we have to enable it. */
-	adc_enable_temperature_sensor();
+
+	/* We want to read the temperature sensor, so we have to enable it.
+	adc_enable_temperature_sensor(); */
+
 	adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_28DOT5CYC);
 
 	adc_power_on(ADC1);
@@ -147,9 +158,24 @@ static void my_usart_print_int(uint32_t usart, int value)
 	usart_send_blocking(usart, '\r');
 }
 
-int main(void)
+static void task_start_ADC1_convesion_direct(void)
 {
 	uint8_t channel_array[16];
+
+	/* Select the channel we want to convert, ADC0 == PA0 */
+	channel_array[0] = 0; 
+	adc_set_regular_sequence(ADC1, 1, channel_array);
+	adc_start_conversion_direct(ADC1);
+
+	/* adc1_2_isr :  IRQ will handle the read part */
+
+	/* Set the injected sequence here, with number of channels 
+	adc_set_injected_sequence(ADC1, 1, channel_array); */
+
+}
+
+int main(void)
+{
 
 	rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
 						 
@@ -168,10 +194,11 @@ int main(void)
 	usart_send_blocking(USART2, '\r');
 	usart_send_blocking(USART2, '\n');
 
-	/* Select the channel we want to convert. 16=temperature_sensor. */
-	channel_array[0] = 16;
-	/* Set the injected sequence here, with number of channels */
-	adc_set_injected_sequence(ADC1, 1, channel_array);
+	task_start_ADC1_convesion_direct();
+
+	usart_send_blocking(USART2, 'e');
+	task_start_ADC1_convesion_direct();
+	for(;;);
 
 	/* Continously convert and poll the temperature ADC. */
 	while (1) {
@@ -197,10 +224,6 @@ int main(void)
 
 void adc1_2_isr(void)
 {
-    /* Clear Injected End Of Conversion (JEOC) */
-	/* TODO : Remove injected */
-    ADC_SR(ADC1) &= ~ADC_SR_JEOC;
-
-	/* Push to queue */
-    temperature = adc_read_injected(ADC1,1);
+    temperature = adc_read_regular(ADC1);
+	usart_send_blocking(USART2, 'd');
 }
