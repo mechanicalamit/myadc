@@ -23,11 +23,9 @@
 #include "task.h"
 
 #include <libopencm3/stm32/rcc.h>
-#include <libopencm3/stm32/flash.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/adc.h>
 #include <libopencm3/stm32/usart.h>
-#include <libopencm3/stm32/timer.h>
 #include <libopencm3/cm3/nvic.h>
 
 /* TODO : Setup Data Structures, long queue for ADC, short queue for Filtering, One value for UART */
@@ -37,7 +35,6 @@ static void usart_setup(void)
 {
 	/* Enable clocks for GPIO port A (for GPIO_USART1_TX) and USART1. */
 	rcc_periph_clock_enable(RCC_GPIOA);
-	rcc_periph_clock_enable(RCC_GPIOC);
 	rcc_periph_clock_enable(RCC_USART2);
 
 	/* Setup GPIO pin GPIO_USART1_TX/GPIO9 on GPIO port A for transmit. */
@@ -56,17 +53,6 @@ static void usart_setup(void)
 	usart_enable(USART2);
 }
 
-static void gpio_setup(void)
-{
-	/* Enable GPIO clocks. */
-	rcc_periph_clock_enable(RCC_GPIOA);
-	rcc_periph_clock_enable(RCC_GPIOC);
-
-	/* Setup the LEDs. */
-	gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL,
-		      GPIO13);
-}
-
 static void irq_setup(void)
 {
 	/* Enable the adc1_2_isr() routine */
@@ -76,7 +62,15 @@ static void irq_setup(void)
 
 static void adc_setup(void)
 {
-	int i; /* Remove with vDelay/vSleep */
+	int i; 
+
+	/* Enable GPIO clocks. A for ADC, C for LED */
+	rcc_periph_clock_enable(RCC_GPIOA);
+	rcc_periph_clock_enable(RCC_GPIOC);
+
+	/* Setup the LEDs. */
+	gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ, GPIO_CNF_OUTPUT_PUSHPULL,
+		      GPIO13);
 
 	/* Setup GPIO for ADC Pin PA0 and maybe PA1 */
 	gpio_set_mode(GPIOA, GPIO_MODE_INPUT, GPIO_CNF_INPUT_ANALOG, GPIO0);
@@ -108,7 +102,6 @@ static void adc_setup(void)
 	adc_power_on(ADC1);
 
 	/* Wait for ADC starting up. */
-	/* TODO : Change with vDelay */
 	for (i = 0; i < 800000; i++) /* Wait a bit. */
 		__asm__("nop");
 
@@ -150,9 +143,7 @@ static void task_ADC1(void *arg __attribute((unused)))
 	adc_set_regular_sequence(ADC1, 1, channel_array);
 
 	for (;;) {
-		gpio_toggle(
-			GPIOC,
-			GPIO13); /* Toggle led on every request, also heartbeat */
+		gpio_toggle(GPIOC, GPIO13); /* Heartbeat */
 		adc_start_conversion_direct(ADC1);
 		/* adc1_2_isr :  IRQ will handle the read part */
 		vTaskDelay(xDelay);
@@ -162,9 +153,6 @@ static void task_ADC1(void *arg __attribute((unused)))
 int main(void)
 {
 	rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
-
-	/* TODO : GPIO setup, see if we can move these to the peripherals using it */
-	gpio_setup();
 
 	/* Setup UART */
 	usart_setup();
@@ -189,7 +177,7 @@ int main(void)
 	usart_send_blocking(USART2, 'e');
 
 	/* Start ADC Task */
-	xTaskCreate(task_ADC1, "demo", 300, NULL, 1, NULL);
+	xTaskCreate(task_ADC1, "startADC_Conv", 300, NULL, 1, NULL);
 
 	vTaskStartScheduler();
 	for (;;)
