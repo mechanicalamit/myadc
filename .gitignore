@@ -1,0 +1,10 @@
+libopencm3
+*.elf
+*.i
+*.d
+*.s
+*.o
+*.map
+tags
+
+no changes added to commit (use "git add" and/or "git commit -a")
