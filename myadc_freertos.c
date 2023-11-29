@@ -27,7 +27,7 @@
 #include <libopencm3/stm32/timer.h>
 #include <libopencm3/cm3/nvic.h>
 
-volatile uint16_t temperature = 0;
+volatile uint16_t myadc_val = 0;
 
 static void usart_setup(void)
 {
@@ -61,26 +61,6 @@ static void gpio_setup(void)
 	/* Setup the LEDs. */
 	gpio_set_mode(GPIOC, GPIO_MODE_OUTPUT_2_MHZ,
 		      GPIO_CNF_OUTPUT_PUSHPULL, GPIO13);
-}
-
-static void timer_setup(void)
-{
-	/* Set up the timer TIM2 for injected sampling */
-	uint32_t timer;
-
-	timer   = TIM2;
-	rcc_periph_clock_enable(RCC_TIM2);
-
-	/* Time Base configuration */
-    rcc_periph_reset_pulse(RST_TIM2);
-    timer_set_mode(timer, TIM_CR1_CKD_CK_INT,
-	    TIM_CR1_CMS_EDGE, TIM_CR1_DIR_UP);
-    timer_set_period(timer, 0xFF);
-    timer_set_prescaler(timer, 0x8);
-    timer_set_clock_division(timer, 0x0);
-    /* Generate TRGO on every update. */
-    timer_set_master_mode(timer, TIM_CR2_MMS_UPDATE);
-    timer_enable_counter(timer);
 }
 
 static void irq_setup(void)
@@ -119,9 +99,6 @@ static void adc_setup(void)
 	adc_enable_eoc_interrupt(ADC1);
 	adc_set_right_aligned(ADC1);
 
-	/* We want to read the temperature sensor, so we have to enable it.
-	adc_enable_temperature_sensor(); */
-
 	adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_28DOT5CYC);
 
 	adc_power_on(ADC1);
@@ -156,6 +133,7 @@ static void my_usart_print_int(uint32_t usart, int value)
 	}
 
 	usart_send_blocking(usart, '\r');
+	usart_send_blocking(usart, '\n');
 }
 
 static void task_start_ADC1_convesion_direct(void)
@@ -163,15 +141,13 @@ static void task_start_ADC1_convesion_direct(void)
 	uint8_t channel_array[16];
 
 	/* Select the channel we want to convert, ADC0 == PA0 */
+
 	channel_array[0] = 0; 
 	adc_set_regular_sequence(ADC1, 1, channel_array);
+	gpio_toggle(GPIOC, GPIO13); /* Toggle led on every request */
 	adc_start_conversion_direct(ADC1);
 
 	/* adc1_2_isr :  IRQ will handle the read part */
-
-	/* Set the injected sequence here, with number of channels 
-	adc_set_injected_sequence(ADC1, 1, channel_array); */
-
 }
 
 int main(void)
@@ -181,7 +157,6 @@ int main(void)
 						 
 	gpio_setup();
 	usart_setup();
-	timer_setup();
 	irq_setup();
 	adc_setup();
 
@@ -197,26 +172,11 @@ int main(void)
 	task_start_ADC1_convesion_direct();
 
 	usart_send_blocking(USART2, 'e');
-	task_start_ADC1_convesion_direct();
+	my_usart_print_int(USART2, myadc_val);
 	for(;;);
 
-	/* Continously convert and poll the temperature ADC. */
 	while (1) {
-		/*
-		 * Since sampling is triggered by the timer and copying the value
-		 * out of the data register is handled by the interrupt routine,
-		 * we just need to print the value and toggle the LED. It may be useful
-		 * to buffer the adc values in some cases.
-		 */
-
-		/*
-		 * That's actually not the real temperature - you have to compute it
-		 * as described in the datasheet.
-		 */
-		my_usart_print_int(USART2, temperature);
-
-		gpio_toggle(GPIOC, GPIO13); /* LED2 on */
-
+		my_usart_print_int(USART2, myadc_val);
 	}
 
 	return 0;
@@ -224,6 +184,6 @@ int main(void)
 
 void adc1_2_isr(void)
 {
-    temperature = adc_read_regular(ADC1);
-	usart_send_blocking(USART2, 'd');
+    myadc_val = adc_read_regular(ADC1); 
+    usart_send_blocking(USART2, 'd');
 }
