@@ -35,11 +35,11 @@ uint16_t myadc_val = 0;
 /* TODO : Setup Data Structures, long queue for ADC, short queue for Filtering, One value for UART */
 
 /* Queue to push data from ADC read ISR, unit16_t queue is sufficient */
-#define ADC_PUSH_QLEN 10
+#define ADC_PUSH_QLEN 50
 static QueueHandle_t adc_push_q;
 
 /* Queue to push data from filter task to UART task */
-#define FILT_PUSH_QLEN 10
+#define FILT_PUSH_QLEN 50
 static QueueHandle_t filt_push_q;
 
 /* ADC values Plausibility limits */
@@ -81,7 +81,7 @@ static void usart_setup(void)
 static void irq_setup(void)
 {
 	/* Enable the adc1_2_isr() routine */
-	nvic_set_priority(NVIC_ADC1_2_IRQ, 0x00); /* Top 4 bits set priority */
+	nvic_set_priority(NVIC_ADC1_2_IRQ, 0xA0); /* Top 4 bits set priority */
 	nvic_enable_irq(NVIC_ADC1_2_IRQ);
 }
 
@@ -112,7 +112,7 @@ static void adc_setup(void)
 	adc_enable_eoc_interrupt(ADC1);
 	adc_set_right_aligned(ADC1);
 
-	adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_28DOT5CYC);
+	adc_set_sample_time_on_all_channels(ADC1, ADC_SMPR_SMP_239DOT5CYC);
 
 	adc_power_on(ADC1);
 
@@ -155,13 +155,17 @@ static void task_uart(void *arg __attribute((unused)))
 
 	/* Receive from Filt queue, 
 	 * Already checked for plausibility, so value is good
-	 * Do nothing if nothing received */
+	 * Delay and let others run if nothing received */
 	for (;;) {
 		if (xQueueReceive(filt_push_q, &locvar, 0) == pdTRUE) {
 			locavg = ((locavg >> 2) + (locvar >> 2)); /* Cannot overflow also */
-			my_usart_print_int(USART2, locavg);
+		/*	my_usart_print_int(USART2, locavg); */
 		}
-		vTaskDelay(task_UART_DELAY / portTICK_PERIOD_MS);
+		else
+			vTaskDelay( 1 / portTICK_PERIOD_MS);
+
+		taskYIELD();
+		/* vTaskDelay(task_UART_DELAY / portTICK_PERIOD_MS); */
 	}
 }
 
@@ -171,19 +175,23 @@ static void task_filter(void *arg __attribute((unused)))
 
 	/* Receive from ADC queue, 
 	 * Filter(based on max and min), and send to next queue if received
-	 * Do nothing if nothing received */
+	 * Delay and let others run if nothing received */
 	for (;;) {
 		if (xQueueReceive(adc_push_q, &locvar, 0) == pdTRUE) {
-			gpio_toggle(GPIOC, GPIO13); /* Heartbeat 2 */
 			if ((locvar >= ADC_VAL_MIN) && (locvar <= ADC_VAL_MAX)) {
 				if (xQueueSend(filt_push_q, &locvar, 0) != pdTRUE)
-					usart_send_blocking( USART2, 'f'); /* Failed to send to next(filt) queue */
+					/* usart_send_blocking( USART2, 'f');  Failed to send to next(filt) queue */ 
+					gpio_toggle(GPIOC, GPIO13); /* Heartbeat 2 */
 			} else {
-				usart_send_blocking( USART2, 'l'); /* We are outside Plausibility limits */
+			/* 	usart_send_blocking( USART2, 'l');  We are outside Plausibility limits */ 
+				gpio_toggle(GPIOC, GPIO13); /* Heartbeat 2 */
 			}
-		}; /* No else for xQueueReceive */
+		}
+		else
+			vTaskDelay( 1 / portTICK_PERIOD_MS);
 
-		vTaskDelay(task_FILT_DELAY / portTICK_PERIOD_MS);
+		taskYIELD();
+		/* vTaskDelay(task_FILT_DELAY / portTICK_PERIOD_MS); */
 	}
 }
 
@@ -195,12 +203,9 @@ static void task_ADC1(void *arg __attribute((unused)))
 	channel_array[0] = 0;
 	adc_set_regular_sequence(ADC1, 1, channel_array);
 
-	for (;;) {
-		gpio_toggle(GPIOC, GPIO13); /* Heartbeat */
-		adc_start_conversion_direct(ADC1);
-		/* adc1_2_isr :  IRQ will handle the read part */
-		vTaskDelay(task_ADC_DELAY / portTICK_PERIOD_MS);
-	}
+	adc_set_continuous_conversion_mode(ADC1);
+	adc_start_conversion_direct(ADC1);
+	vTaskDelete(NULL); /* Delete this task */
 }
 
 int main(void)
@@ -226,6 +231,10 @@ int main(void)
 	usart_send_blocking(USART2, 'm');
 	usart_send_blocking(USART2, '\r');
 	usart_send_blocking(USART2, '\n');
+	
+	/* Clear LED, so that we know its off. 
+	 * Now LED coming ON or toggling means something is not right */
+	gpio_clear(GPIOC, GPIO13); 
 
 	/* Consumers get higher task priority so that we don't overflow queues */
 	/* Start UART Task, Priority 3 */
@@ -238,7 +247,7 @@ int main(void)
 	xTaskCreate(task_ADC1, "startADC_Conv", 300, NULL, task_ADC_PRIO, NULL);
 
 	/* All Tasks created */
-	usart_send_blocking(USART2, 'e');
+	/* usart_send_blocking(USART2, 'e'); */
 
 	vTaskStartScheduler();
 	for (;;)
@@ -253,8 +262,10 @@ void adc1_2_isr(void)
 	 * Push the variable onto a queue
 	 * If queue is full, drop the value and print('d') for demo purposes */
 	myadc_val = adc_read_regular(ADC1);
-	if (xQueueSendFromISR(adc_push_q, &myadc_val, NULL) != pdTRUE)
-		usart_send_blocking(USART2, 'd');
+	if (xQueueSendFromISR(adc_push_q, &myadc_val, NULL) != pdTRUE) {
+		gpio_toggle(GPIOC, GPIO13); /* Heartbeat 2 */
+		/* usart_send_blocking(USART2, 'd'); */
+	}
 }
 
 /* vim: tabstop=4 :set noexpandtab: */
