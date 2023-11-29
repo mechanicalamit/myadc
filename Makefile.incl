@@ -128,7 +128,7 @@ tags:
 
 clean:
 	@#printf "  CLEAN\n"
-	$(RM) *.o *.d generated.* $(OBJS) $(patsubst %.o,%.d,$(OBJS)) tags
+	$(RM) *.o *.d *.i *.s generated.* $(OBJS) $(patsubst %.o,%.d,$(OBJS)) tags
 
 
 clobber: clean
