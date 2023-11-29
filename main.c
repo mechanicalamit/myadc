@@ -21,6 +21,7 @@
 
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
 
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
@@ -28,8 +29,25 @@
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/cm3/nvic.h>
 
+
+/* Read variable for ADC_regular_read, Even though uint32_t is returned, only the lower 16 bits have the ADC values */
+uint16_t myadc_val = 0;
+
 /* TODO : Setup Data Structures, long queue for ADC, short queue for Filtering, One value for UART */
-volatile uint16_t myadc_val = 0;
+
+/* Queue to push data from ADC read ISR, unit16_t queue is sufficient */
+#define ADC_PUSH_QLEN 10
+static QueueHandle_t adc_push_q;
+
+/* Queue to push data from filter task to UART task */
+#define FILT_PUSH_QLEN 10
+static QueueHandle_t filt_push_q;
+
+/* ADC values Plausibility limits */
+#define ADC_VAL_MIN	500
+#define ADC_VAL_MAX 50000
+
+
 
 static void usart_setup(void)
 {
@@ -133,10 +151,33 @@ static void my_usart_print_int(uint32_t usart, int value)
 	usart_send_blocking(usart, '\n');
 }
 
+static void task_filter(void *arg __attribute((unused)))
+{
+	uint16_t locvar;
+
+	/* Receive from ADC queue, 
+	 * Filter(based on max and min), and send to next queue if received
+	 * Do nothing if nothing received */
+	for (;;) {
+		if (xQueueReceive(adc_push_q, &locvar, 0) == pdTRUE){
+			gpio_toggle(GPIOC, GPIO13); /* Heartbeat 2 */
+			if ( (locvar >= ADC_VAL_MIN) && (locvar <= ADC_VAL_MAX) ) {
+				if (xQueueSend(filt_push_q, &locvar, 0) != pdTRUE)
+					usart_send_blocking(USART2, 'f'); /* Failed to send to next(filt) queue */
+			}
+			else {
+					usart_send_blocking(USART2, 'l'); /* We are outside Plausibility limits */
+			}
+		}; /* No else for xQueueReceive */
+
+		vTaskDelay( 400 / portTICK_PERIOD_MS );
+	}
+}
+
+
 static void task_ADC1(void *arg __attribute((unused)))
 {
 	static uint8_t channel_array[16];
-	const TickType_t xDelay = 500 / portTICK_PERIOD_MS;
 
 	/* Select the channel we want to convert, ADC0 == PA0 */
 	channel_array[0] = 0;
@@ -146,9 +187,9 @@ static void task_ADC1(void *arg __attribute((unused)))
 		gpio_toggle(GPIOC, GPIO13); /* Heartbeat */
 		adc_start_conversion_direct(ADC1);
 		/* adc1_2_isr :  IRQ will handle the read part */
-		vTaskDelay(xDelay);
+		vTaskDelay( 500 / portTICK_PERIOD_MS );
 	}
-}
+} 
 
 int main(void)
 {
@@ -163,21 +204,30 @@ int main(void)
 	/* Setup ADC */
 	adc_setup();
 
-	/* Start UART Task, Consumers first */
+	/* Data Structures, see Declarations at top of file */
+	adc_push_q = xQueueCreate(ADC_PUSH_QLEN, sizeof(uint16_t));
+	filt_push_q = xQueueCreate(FILT_PUSH_QLEN, sizeof(uint16_t));
 
-	/* Start filtering Task */
 
-	/* Send a message on USART1. */
+	/* Send a message on USART1 to show startup demarcation */
 	usart_send_blocking(USART2, 's');
 	usart_send_blocking(USART2, 't');
 	usart_send_blocking(USART2, 'm');
 	usart_send_blocking(USART2, '\r');
 	usart_send_blocking(USART2, '\n');
 
-	usart_send_blocking(USART2, 'e');
 
-	/* Start ADC Task */
+	/* Consumers get higher task priority so that we don't overflow queues */
+	/* Start UART Task, Priority 3 */
+
+	/* Start filtering Task, Priority 2 */
+	xTaskCreate(task_filter, "task_filter", 300, NULL, 2, NULL);
+
+	/* Start ADC Task, Priority 1 */
 	xTaskCreate(task_ADC1, "startADC_Conv", 300, NULL, 1, NULL);
+
+	/* All Tasks created */
+	usart_send_blocking(USART2, 'e');
 
 	vTaskStartScheduler();
 	for (;;)
@@ -188,9 +238,12 @@ int main(void)
 
 void adc1_2_isr(void)
 {
-	/* TODO : Read and it to queue */
+	/* EOC ISR, read the ADC value and store in a variable
+	 * Push the variable onto a queue
+	 * If queue is full, drop the value and print('d') for demo purposes */
 	myadc_val = adc_read_regular(ADC1);
-	usart_send_blocking(USART2, 'd');
+	if (xQueueSendFromISR(adc_push_q, &myadc_val, NULL) != pdTRUE)
+		usart_send_blocking(USART2, 'd');
 }
 
 /* vim: tabstop=4 :set noexpandtab: */

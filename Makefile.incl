@@ -124,7 +124,7 @@ print-%:
 	$(AS) $(ASFLAGS) -o $*.o -c $<
 
 tags:
-	ctags *.c *.h
+	ctags *.c *.h rtos/*.c rtos/*.h
 
 clean:
 	@#printf "  CLEAN\n"
